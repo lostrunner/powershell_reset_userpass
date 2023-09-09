@@ -1,0 +1,99 @@
+# Import required PowerShell modules
+Import-Module ActiveDirectory
+
+# Define your SMTP server settings
+$SMTPServer = "mailserver.mydomain.to"
+$SMTPUsername = "noreply@mydomain.to"
+$SMTPPassword = "mailaccountpassword"
+
+# Define the SOAP service URL
+$soapServiceURL = "https://myownsendsmsservice_page/wsi/service.php?wsdl"
+
+# Function to generate a random password
+function Generate-RandomPassword {
+    $capitalLetter = [char](Get-Random -InputObject (65..90))
+    $smallLetter = [char](Get-Random -InputObject (97..122))
+    $number = [char](Get-Random -InputObject (48..57))
+    
+    $randomPasswordChars = @($capitalLetter, $smallLetter, $number)
+    
+    $randomPasswordChars += (Get-Random -InputObject (48..57) -Count 5 | ForEach-Object { [char]$_ })
+    $randomPasswordChars += (Get-Random -InputObject (65..90) -Count 1 | ForEach-Object { [char]$_ })
+    $randomPasswordChars += (Get-Random -InputObject (97..122) -Count 1 | ForEach-Object { [char]$_ })
+    
+    $randomPassword = ($randomPasswordChars | Get-Random -Count 8) -join ''
+    
+    return $randomPassword
+}
+
+# Open a session with the SOAP service
+$soapClient = New-WebServiceProxy -Uri $soapServiceURL
+$sessionID = $soapClient.openSession("soapserviceuser", "soapservicepass")
+
+# Define the path to your CSV file
+$CSVFilePath = "path_to\list.csv"
+
+# Check if the CSV file exists
+if (Test-Path -Path $CSVFilePath) {
+    # Read the CSV file
+    $csvData = Import-Csv -Path $CSVFilePath
+    
+    # Loop through each row in the CSV
+    foreach ($row in $csvData) {
+        # Extract user information from the CSV using the correct column names
+        $adLoginUser = $row.ad_login_user    # Replace with the actual column name in your CSV
+        $phoneNumber = $row.phone_number    # Replace with the actual column name in your CSV
+        
+        # Check if the required columns are not empty
+        if ([string]::IsNullOrEmpty($adLoginUser) -or [string]::IsNullOrEmpty($phoneNumber)) {
+            Write-Host "Skipping row due to missing data."
+            continue  # Skip rows with missing data
+        }
+
+        # PowerShell will display the values of $adLoginUser and $phoneNumber
+        Write-Host "Processing $adLoginUser with $phoneNumber"
+
+        # Retrieve the email address from Active Directory using -Identity
+        try {
+            $adUser = Get-ADUser -Identity $adLoginUser -Properties EmailAddress -ErrorAction Stop
+            $emailAddress = $adUser.EmailAddress
+        } catch {
+           Write-Host "User with SamAccountName $adLoginUser not found in Active Directory. Skipping."
+           continue  # Skip to the next user in the CSV
+        }
+
+        # Generate a random password
+        $randomPassword = Generate-RandomPassword
+
+        # Generate the message
+        $msg = "For the domain user $adLoginUser the password is $randomPassword"
+
+        # Create a PSCredential object with the predefined username and password
+        $SMTPCredentials = New-Object System.Management.Automation.PSCredential ($SMTPUsername, (ConvertTo-SecureString $SMTPPassword -AsPlainText -Force))
+    
+        # Check if $emailAddress is not empty or null
+        if (-not [string]::IsNullOrWhiteSpace($emailAddress)) {
+             # Send email notification
+             $emailBody = "The password for $adLoginUser has been reset because the password has been set to another user's account or it has been published on the internet as a breached password."
+             $emailSubject = "Your domain account password has been reset."
+             Send-MailMessage -SmtpServer $SMTPServer -From $SMTPUsername -To $emailAddress -Subject $emailSubject -Body $emailBody -Credential $SMTPCredentials -UseSsl ;
+        }    else {
+             Write-Host "Email address for $adLoginUser is empty. Skipping email notification."
+             }
+
+        # Send SMS using the SOAP service
+        $date = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+        try {
+        $soapClient.sendSession($sessionID, $phoneNumber, $msg, $date, "", 0)
+        } catch {
+        $errorUser = $adLoginUser  # Assign $adLoginUser to another variable
+        $errorMessage = $_.Exception.Message
+        Write-Host "Error sending SMS for user ${errorUser}: $errorMessage"
+        }
+        # Reset AD password
+        Set-ADAccountPassword -Identity $adUser -Reset -NewPassword (ConvertTo-SecureString $randomPassword -AsPlainText -Force)
+        }
+} 
+
+# Close the session with the SOAP service (optional)
+$soapClient.closeSession($sessionID)
